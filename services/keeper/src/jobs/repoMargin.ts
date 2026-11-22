@@ -18,18 +18,12 @@
 import { and, eq, isNull } from "drizzle-orm";
 import { schema, type Database } from "@ballast/db";
 import { scaledToDecimalString } from "@ballast/domain-types";
-import { loadNetworkConfig } from "@ballast/network-config";
 import type { RepoDvpClient } from "@ballast/contract-clients";
-import { submitSignedTx, type KmsSigner } from "@ballast/operator-signing";
+import type { KmsSigner } from "@ballast/operator-signing";
+import { signAndSubmit } from "./submit.js";
 import { emptyResult, type JobResult } from "./types.js";
 
 const IN_CALL_BAND = new Set(["MarginCall", "Liquidation"]);
-
-async function signAndSubmit(signer: KmsSigner, unsignedXdr: string): Promise<string> {
-  const network = loadNetworkConfig();
-  const submitted = await submitSignedTx(network.rpcUrl, network.networkPassphrase, await signer.sign(unsignedXdr));
-  return submitted.hash;
-}
 
 export async function runRepoMarginJob(
   db: Database,
@@ -83,6 +77,8 @@ export async function runRepoMarginJob(
         const after = await repoDvpClient.trade(id);
 
         if (after.pendingMarginCall && after.cureDeadline != null) {
+          // RepoDvP cash legs and margin calls are strictly denominated in USDC (the single
+          // configured settlement asset set via RepoDvP.set_usdc), per PRD §5 and §8.
           await db.insert(schema.repoMarginCall).values({
             tradeId: trade.id,
             amount: scaledToDecimalString(BigInt(after.marginCallAmount)),

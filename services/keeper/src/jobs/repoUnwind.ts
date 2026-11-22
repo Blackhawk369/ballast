@@ -10,9 +10,9 @@
  */
 import { and, eq, lte } from "drizzle-orm";
 import { schema, type Database } from "@ballast/db";
-import { loadNetworkConfig } from "@ballast/network-config";
 import type { RepoDvpClient } from "@ballast/contract-clients";
-import { submitSignedTx, type KmsSigner } from "@ballast/operator-signing";
+import type { KmsSigner } from "@ballast/operator-signing";
+import { signAndSubmit } from "./submit.js";
 import { emptyResult, type JobResult } from "./types.js";
 
 export async function runRepoUnwindJob(
@@ -58,13 +58,11 @@ export async function runRepoUnwindJob(
       }
 
       const unsignedXdr = await repoDvpClient.unwind(signer.publicKey(), contractId);
-      const signedXdr = await signer.sign(unsignedXdr);
-      const network = loadNetworkConfig();
-      const submitted = await submitSignedTx(network.rpcUrl, network.networkPassphrase, signedXdr);
+      const hash = await signAndSubmit(signer, unsignedXdr);
 
       await db
         .update(schema.repoTrade)
-        .set({ status: "unwound", leg2Tx: submitted.hash })
+        .set({ status: "unwound", leg2Tx: hash })
         .where(eq(schema.repoTrade.id, trade.id));
 
       result.processed++;

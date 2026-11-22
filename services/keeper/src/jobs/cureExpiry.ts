@@ -29,22 +29,15 @@
 import { and, desc, eq } from "drizzle-orm";
 import { schema, type Database } from "@ballast/db";
 import { decimalStringToScaled, scaledToDecimalString } from "@ballast/domain-types";
-import { loadNetworkConfig } from "@ballast/network-config";
 import type { CreditLineClient, PledgeVaultClient } from "@ballast/contract-clients";
-import { submitSignedTx, type KmsSigner } from "@ballast/operator-signing";
+import type { KmsSigner } from "@ballast/operator-signing";
+import { signAndSubmit } from "./submit.js";
 import { emptyResult, type JobResult } from "./types.js";
 
 const UNHEALTHY = new Set(["MarginCall", "Liquidation"]);
 
 /** How far back to look for the start of the current unhealthy stretch. */
 const EVENT_LOOKBACK = 50;
-
-async function signAndSubmit(signer: KmsSigner, unsignedXdr: string): Promise<string> {
-  const network = loadNetworkConfig();
-  const signedXdr = await signer.sign(unsignedXdr);
-  const submitted = await submitSignedTx(network.rpcUrl, network.networkPassphrase, signedXdr);
-  return submitted.hash;
-}
 
 export async function runCureExpiryJob(
   db: Database,

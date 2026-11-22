@@ -7,9 +7,9 @@
  */
 import { eq } from "drizzle-orm";
 import { schema, type Database } from "@ballast/db";
-import { loadNetworkConfig } from "@ballast/network-config";
 import type { CreditLineClient } from "@ballast/contract-clients";
-import { submitSignedTx, type KmsSigner } from "@ballast/operator-signing";
+import type { KmsSigner } from "@ballast/operator-signing";
+import { signAndSubmit } from "./submit.js";
 import { emptyResult, type JobResult } from "./types.js";
 
 export async function runInterestAccrualJob(
@@ -31,9 +31,7 @@ export async function runInterestAccrualJob(
       // `poke` is permissionless on-chain, but the envelope's source account has to be the
       // account that signs it — the keeper operator key here.
       const unsignedXdr = await creditLineClient.poke(BigInt(line.contractLineId), signer.publicKey());
-      const signedXdr = await signer.sign(unsignedXdr);
-      const network = loadNetworkConfig();
-      await submitSignedTx(network.rpcUrl, network.networkPassphrase, signedXdr);
+      await signAndSubmit(signer, unsignedXdr);
       result.processed++;
     } catch (err) {
       result.errors.push({ id: line.id, message: err instanceof Error ? err.message : String(err) });
