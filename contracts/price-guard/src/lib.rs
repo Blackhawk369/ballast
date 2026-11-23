@@ -1960,6 +1960,75 @@ mod test {
     }
 
     #[test]
+    fn is_fresh_staleness_and_future_skew_boundaries() {
+        let env = Env::default();
+        let now = 10_000u64;
+        env.ledger().set_timestamp(now);
+        let max_staleness_s = 3600u64;
+
+        let make_source = |observed_at: u64| PriceSource {
+            name: Symbol::new(&env, "testsrc"),
+            value: SCALE,
+            observed_at,
+            stale: false,
+        };
+
+        // 1. Age exactly max_staleness_s is fresh
+        let at_max_staleness = make_source(now - max_staleness_s);
+        assert!(
+            is_fresh(&env, &at_max_staleness, max_staleness_s),
+            "reading at exactly max_staleness_s must be fresh"
+        );
+
+        // 2. Age max_staleness_s + 1 is stale
+        let past_max_staleness = make_source(now - max_staleness_s - 1);
+        assert!(
+            !is_fresh(&env, &past_max_staleness, max_staleness_s),
+            "reading at max_staleness_s + 1 must be stale"
+        );
+
+        // 3. observed_at = now + MAX_FUTURE_SKEW_S (60s) is fresh
+        let at_max_future_skew = make_source(now + MAX_FUTURE_SKEW_S);
+        assert!(
+            is_fresh(&env, &at_max_future_skew, max_staleness_s),
+            "reading at now + MAX_FUTURE_SKEW_S must be fresh"
+        );
+
+        // 4. observed_at = now + MAX_FUTURE_SKEW_S + 1 (61s) is not fresh
+        let beyond_future_skew = make_source(now + MAX_FUTURE_SKEW_S + 1);
+        assert!(
+            !is_fresh(&env, &beyond_future_skew, max_staleness_s),
+            "reading at now + MAX_FUTURE_SKEW_S + 1 must not be fresh"
+        );
+    }
+
+    #[test]
+    fn publish_source_boundary_at_max_future_skew_and_plus_one() {
+        let (env, client, publisher, _risk, asset) = setup(50, 100, 3600);
+        let now = 10_000u64;
+        env.ledger().set_timestamp(now);
+        let feed_name = feed(&env);
+
+        // 1. now + MAX_FUTURE_SKEW_S is accepted by publish_source
+        client.publish_source(&publisher, &asset, &feed_name, &SCALE, &(now + MAX_FUTURE_SKEW_S));
+
+        // 2. now + MAX_FUTURE_SKEW_S + 1 (61s ahead) is refused with panic
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.publish_source(
+                &publisher,
+                &asset,
+                &feed_name,
+                &SCALE,
+                &(now + MAX_FUTURE_SKEW_S + 1),
+            );
+        }));
+        assert!(
+            res.is_err(),
+            "publish_source at now + MAX_FUTURE_SKEW_S + 1 must be refused"
+        );
+    }
+
+    #[test]
     fn a_reading_that_ages_into_staleness_stops_counting() {
         let (env, client, publisher, _risk, asset) = setup(50, 100, 3600);
         let code = asset_code(&env);
