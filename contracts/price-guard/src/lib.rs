@@ -1261,6 +1261,89 @@ mod test {
         (env, client, price_publisher, risk, asset)
     }
 
+    /// Setup helper for a fresh deployment that does NOT disable the signature requirement,
+    /// leaving `require_nav_signature` in its default state (`true`).
+    fn setup_fresh_deployment(
+        band_bps: u32,
+        daily_move_band_bps: u32,
+        max_staleness_s: u64,
+    ) -> (Env, PriceGuardClient<'static>, Address, Address, Address, Address) {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let id = env.register(PriceGuard, ());
+        let client = PriceGuardClient::new(&env, &id);
+
+        let admin = Address::generate(&env);
+        let pauser = Address::generate(&env);
+        let keeper = Address::generate(&env);
+        let price_publisher = Address::generate(&env);
+        let risk = Address::generate(&env);
+        client.initialize(&admin, &pauser, &keeper, &price_publisher, &risk);
+
+        let asset = Address::generate(&env);
+        client.configure_asset(
+            &admin,
+            &asset,
+            &band_bps,
+            &daily_move_band_bps,
+            &DEFAULT_WINDOW_SECONDS,
+            &DEFAULT_WINDOW_MOVE_BAND_BPS,
+            &max_staleness_s,
+        );
+
+        (env, client, admin, price_publisher, risk, asset)
+    }
+
+    #[test]
+    #[should_panic(expected = "price-guard: already initialized")]
+    fn second_initialize_panics_already_initialized() {
+        let (env, client, admin, _publisher, _risk, _asset) =
+            setup_fresh_deployment(50, 100, 3600);
+        let pauser = Address::generate(&env);
+        let keeper = Address::generate(&env);
+        let publisher = Address::generate(&env);
+        let risk = Address::generate(&env);
+        client.initialize(&admin, &pauser, &keeper, &publisher, &risk);
+    }
+
+    #[test]
+    fn signature_requirement_defaults_to_true_and_disabling_allows_zero_signature() {
+        let (env, client, admin, publisher, _risk, asset) =
+            setup_fresh_deployment(50, 100, 3600);
+        let code = asset_code(&env);
+        let zero_sig = BytesN::from_array(&env, &[0u8; 64]);
+        let now = env.ledger().timestamp();
+
+        // On a fresh deploy, signature requirement must default to true
+        assert_eq!(client.require_nav_signature(), true);
+
+        // Register issuer key so the signature check itself triggers rather than missing key panic
+        let (pubkey, _) = test_issuer_keypair(&env);
+        client.configure_issuer_key(&admin, &asset, &pubkey);
+
+        // Under default require_nav_signature = true, publish_nav with a zero/invalid signature must fail
+        let failed_publish = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.publish_nav(&publisher, &asset, &code, &SCALE, &now, &zero_sig);
+        }));
+        assert!(
+            failed_publish.is_err(),
+            "publish_nav with zero signature must fail under default signature requirement"
+        );
+
+        // Once configure_signature_requirement(false) is called, publish_nav with a zero signature succeeds
+        client.configure_signature_requirement(&admin, &false);
+        assert_eq!(client.require_nav_signature(), false);
+
+        client.publish_nav(&publisher, &asset, &code, &SCALE, &now, &zero_sig);
+        let feed_name = feed(&env);
+        client.publish_source(&publisher, &asset, &feed_name, &SCALE, &now);
+
+        let price = client.guarded_price(&asset);
+        assert_eq!(price.status, PriceStatus::Ok);
+        assert_eq!(price.value, SCALE);
+    }
+
     const SCALE: i128 = ballast_common::price::PRICE_SCALE;
 
     fn asset_code(env: &Env) -> Bytes {
