@@ -41,6 +41,59 @@ machine: `configure_asset` in `CreditLine`, `PledgeVault` and `RepoDvP` calls
 before #78 and silently removed a state (`Warning` or `MarginCall`). Thresholds stored before that
 change are not re-checked; calling `configure_asset` again is the only way to replace them.
 
+## Admin and operational timelocks (Registry and PriceGuard)
+
+Protocol parameter changes, role rotations, and code upgrades are governed by an explicit 48-hour timelock (`ballast_common::timelock::TIMELOCK_DELAY_SECONDS = 172_800`). However, certain emergency and onboarding operations are intentionally immediate.
+
+The table below catalogs every admin, risk, and pauser entry point in `Registry` and `PriceGuard`, documenting caller permissions, execution delay, whether an immediate delay is intended or an open gap, and the security rationale.
+
+### Registry admin functions
+
+| Function | Caller | Delay | Status | Rationale |
+|---|---|---|---|---|
+| `initialize` | Admin | Immediate | Intended | One-time bootstrap on initial deployment before any positions exist; subsequent calls panic (`registry: already initialized`). |
+| `propose_admin` | Current Admin | Immediate | Intended | Leg 1 of two-step admin transfer; sets pending admin without transferring authority until accepted. |
+| `accept_admin` | Nominated Admin | Immediate | Intended | Leg 2 of two-step admin transfer; completes transfer upon recipient confirmation, preventing loss of admin access from typos. |
+| `queue_role_change` | Admin | 48h timelock | Intended | Enforces 48h advance notice before changing operational role addresses (`Pauser`, `Keeper`, `PricePublisher`, `Risk`). |
+| `execute_role_change` | Anyone | 48h after queue | Intended | Permissionless execution once the 48h timelock has elapsed. |
+| `register_asset` | Admin | Immediate | Intended | Onboarding a new asset does not modify existing risk parameters, haircuts, or active borrower positions; users opt in to new assets. |
+| `queue_param` | Admin | 48h timelock | Intended | Adjusting asset parameters (haircuts, LTV thresholds, borrow caps) alters liquidation and credit terms; 48h notice allows borrowers to adjust collateral or repay debt. |
+| `cancel_param` | Admin | Immediate | Intended | Safely cancels a pending parameter change before execution if market conditions shift or an error is caught. |
+| `execute_param` | Anyone | 48h after queue | Intended | Applies queued parameter changes once the 48h timelock has elapsed. |
+| `raise_haircut_now` | Risk | Immediate | Intended | Emergency solvency defense: if an RWA depegs or shows market stress, risk can immediately raise haircuts (tighten risk) to protect the protocol. Can only increase, never decrease. |
+| `pause` | Pauser | Immediate | Intended | Emergency circuit breaker to instantly freeze capital outflows (draws, pledges, exits) during exploits or oracle failures. |
+| `queue_unpause` | Admin | 48h timelock | Intended | Resuming protocol operations after an incident requires 48h notice so users can review the post-incident state before normal activity resumes. |
+| `cancel_unpause` | Admin | Immediate | Intended | Cancels a queued unpause if investigation reveals an ongoing vulnerability. |
+| `execute_unpause` | Anyone | 48h after queue | Intended | Unpauses the target scope once the 48h timelock has elapsed. |
+| `queue_upgrade` | Admin | 48h timelock | Intended | In-place WASM bytecode upgrade changes contract logic; 48h delay provides an opt-out window for capital providers. |
+| `cancel_upgrade` | Admin | Immediate | Intended | Safely aborts a proposed contract upgrade during the review delay. |
+| `execute_upgrade` | Anyone | 48h after queue | Intended | Deploys new WASM bytecode once the 48h delay has elapsed. |
+
+### PriceGuard admin functions
+
+| Function | Caller | Delay | Status | Rationale |
+|---|---|---|---|---|
+| `initialize` | Admin | Immediate | Intended | One-time bootstrap on deployment; subsequent calls panic (`price-guard: already initialized`). |
+| `propose_admin` | Current Admin | Immediate | Intended | Two-step admin transfer nomination without immediate privilege transfer. |
+| `accept_admin` | Nominated Admin | Immediate | Intended | Finalizes admin role transfer upon explicit recipient confirmation. |
+| `queue_role_change` | Admin | 48h timelock | Intended | 48h delay before changing operational roles (`Pauser`, `Keeper`, `PricePublisher`, `Risk`). |
+| `execute_role_change` | Anyone | 48h after queue | Intended | Permissionless execution after the 48h delay has elapsed. |
+| `queue_upgrade` | Admin | 48h timelock | Intended | In-place bytecode upgrades change pricing and circuit breaker logic; requires 48h notice. |
+| `cancel_upgrade` | Admin | Immediate | Intended | Aborts a proposed contract bytecode upgrade. |
+| `execute_upgrade` | Anyone | 48h after queue | Intended | Applies bytecode upgrade after the 48h delay has elapsed. |
+| `configure_asset` | Admin | Dynamic | Intended | Initial asset onboarding and tightening safety bands (narrower price band, shorter max staleness) take effect immediately to enhance security. Loosening bands requires 48h timelock via `queue_config` to prevent stealth weakening of outlier defenses. |
+| `configure_issuer_key` | Admin | Dynamic | Intended | Initial attestor key registration is immediate for onboarding. Rotating an existing attestor key requires 48h timelock via `queue_config` to prevent immediate hijacking of the NAV signer. |
+| `configure_signature_requirement` | Admin | Dynamic | Intended | Requiring signatures (`required = true`) strengthens security and takes effect immediately. Disabling verification (`required = false`) relaxes security and is restricted to the 48h timelock via `queue_config`. |
+| `remove_source` | Admin | Immediate | Intended / Open Gap (#84) | Immediate removal allows admins to drop an exploited, manipulated, or failing oracle source. Open issue [#84](https://github.com/DevTobis/ballast/issues/84) tracks adding an admin allowlist of valid sources. |
+| `queue_config` | Admin | 48h timelock | Intended | Queues loosening configuration changes (`Asset`, `IssuerPubKey`, `SignatureRequirement`) with 48h delay. |
+| `cancel_config` | Admin | Immediate | Intended | Safely cancels an unexecuted queued config change. |
+| `execute_config` | Anyone | 48h after queue | Intended | Applies queued loosening configurations once the 48h delay has elapsed. |
+| `confirm_halt_cleared` | Risk | Immediate | Intended / Open Gap (#807) | Circuit breaker unlatch. When a large price jump trips the circuit breaker, the price locks at `LastGood`. Once human risk operators verify off-chain conditions, unlatching must be immediate to restore trading. Open issue [#807](https://github.com/DevTobis/ballast/issues/807) tracks missing validations when asset is not halted or not configured. |
+
+### Related open gaps in other protocol contracts
+- `ExitDesk.configure_asset`: Currently immediate for all changes; open issue [#214](https://github.com/DevTobis/ballast/issues/214) tracks placing spread and cap loosening behind the 48h timelock.
+- `RepoDvP.configure_asset`: Currently immediate for all changes; open issue [#215](https://github.com/DevTobis/ballast/issues/215) tracks placing margin and haircut loosening behind the 48h timelock.
+
 ## PriceGuard
 
 - The guarded price is the median of fresh sources. Fewer than two fresh sources is `Degraded`;
