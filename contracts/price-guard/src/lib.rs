@@ -2868,6 +2868,109 @@ mod test {
         assert!(!within_band(&[10_051, 10_025, 10_000], 50));
     }
 
+    // -------------------------------------------------------------------------
+    // SortBuf tests: sorting, duplicates, signed numbers, and capacity limits (#113)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn sortbuf_unsorted_three_elements() {
+        let env = Env::default();
+        let mut v = soroban_sdk::Vec::new(&env);
+        v.push_back(3);
+        v.push_back(1);
+        v.push_back(2);
+
+        let mut buf = alloc_free_sort::SortBuf::from(&v);
+        assert_eq!(buf.len(), 3);
+        buf.sort();
+        assert_eq!(buf.get(0), 1);
+        assert_eq!(buf.get(1), 2);
+        assert_eq!(buf.get(2), 3);
+    }
+
+    #[test]
+    fn sortbuf_already_sorted() {
+        let env = Env::default();
+        let mut v = soroban_sdk::Vec::new(&env);
+        v.push_back(1);
+        v.push_back(2);
+        v.push_back(3);
+        v.push_back(4);
+        v.push_back(5);
+
+        let mut buf = alloc_free_sort::SortBuf::from(&v);
+        buf.sort();
+        assert_eq!(buf.len(), 5);
+        for i in 0..5 {
+            assert_eq!(buf.get(i), (i as i128) + 1);
+        }
+    }
+
+    #[test]
+    fn sortbuf_all_equal_duplicates() {
+        let env = Env::default();
+        let mut v = soroban_sdk::Vec::new(&env);
+        v.push_back(7);
+        v.push_back(7);
+        v.push_back(7);
+        v.push_back(7);
+
+        let mut buf = alloc_free_sort::SortBuf::from(&v);
+        buf.sort();
+        assert_eq!(buf.len(), 4);
+        for i in 0..4 {
+            assert_eq!(buf.get(i), 7);
+        }
+    }
+
+    #[test]
+    fn sortbuf_negative_numbers() {
+        let env = Env::default();
+        let mut v = soroban_sdk::Vec::new(&env);
+        v.push_back(-5);
+        v.push_back(10);
+        v.push_back(-20);
+        v.push_back(0);
+        v.push_back(3);
+
+        let mut buf = alloc_free_sort::SortBuf::from(&v);
+        buf.sort();
+        assert_eq!(buf.len(), 5);
+        assert_eq!(buf.get(0), -20);
+        assert_eq!(buf.get(1), -5);
+        assert_eq!(buf.get(2), 0);
+        assert_eq!(buf.get(3), 3);
+        assert_eq!(buf.get(4), 10);
+    }
+
+    #[test]
+    fn sortbuf_exactly_eight_values_capacity_limit() {
+        let env = Env::default();
+        let mut v = soroban_sdk::Vec::new(&env);
+        for val in [8, 7, 6, 5, 4, 3, 2, 1] {
+            v.push_back(val);
+        }
+
+        let mut buf = alloc_free_sort::SortBuf::from(&v);
+        assert_eq!(buf.len(), 8);
+        buf.sort();
+        for i in 0..8 {
+            assert_eq!(buf.get(i), (i as i128) + 1);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "more than 8 fresh sources")]
+    fn sortbuf_nine_values_panics_capacity_exceeded() {
+        let env = Env::default();
+        let mut v = soroban_sdk::Vec::new(&env);
+        for val in 1..=9 {
+            v.push_back(val);
+        }
+
+        let _buf = alloc_free_sort::SortBuf::from(&v);
+    }
+
     #[test]
     fn admin_can_remove_source_and_free_slot() {
         let (env, client, admin, publisher, _risk, asset) = setup_with_admin(50, 10_000, 3600);
