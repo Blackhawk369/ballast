@@ -7,13 +7,17 @@ in this skeleton pass.
 
 | Crate | Responsibility |
 |---|---|
-| `common` | Shared roles/timelock/pause/price/risk/margin logic — not itself a deployable contract |
+| `common` | [Shared roles, timelock, pause, price, risk, and margin logic](common/README.md) — not itself a deployable contract |
 | `registry` | [Asset configs, haircut parameters, timelocked param changes](registry/README.md) |
 | `price-guard` | [Median/band/staleness/halt price logic (PRD §6.4)](price-guard/README.md) |
 | `pledge-vault` | [Escrow/lien collateral positions](pledge-vault/README.md) |
 | `credit-line` | [Credit lines, draws, repayments, storage layout, and the margin state machine](credit-line/README.md) |
 | `exit-desk` | [RWA → USDC instant exit](exit-desk/README.md) |
 | `repo-dvp` | Bilateral repo, atomic DvP |
+
+Every event these contracts publish (topics, payload order and types, emitter, consumers) is listed
+in [`EVENTS.md`](EVENTS.md). Payload order is a compatibility contract with `services/indexer` and
+`services/ledger`: read that file before you change an event.
 
 ## Differences from PRD section 8
 
@@ -98,11 +102,38 @@ all six contracts against the public Stellar testnet.
 
 ## `price-guard`'s `publish_nav` — issuer-signature verification (breaking ABI change)
 
-`PriceGuard.publish_nav` now takes an additional `asset_code: Bytes` argument (the asset's ticker,
+`PriceGuard.publish_nav` takes an additional `asset_code: Bytes` argument (the asset's ticker,
 e.g. `"SPIKO"`, as raw UTF-8 bytes — see the crate's module doc comment) and, when the contract's
 `require_nav_signature` flag is `true` (the default), verifies `sig` against the asset's registered
 issuer key (`configure_issuer_key`, admin-only) over the canonical message
 `"{asset_code}:{ts}:{value}"`, via `env.crypto().ed25519_verify(...)`.
+
+> [!IMPORTANT]
+> NAV is signed by the **price publisher's** key (`configure_issuer_key` registers it), because
+> issuers publish unsigned data. As documented in [contracts/AUDIT_NOTES.md](AUDIT_NOTES.md), the
+> attestor key is the same key that is authorised to publish. On-chain the signature adds no protection
+> against a compromised publisher: it records who relayed the value. **Do not describe it as issuer attestation.**
+>
+> Full specification, key encoding command, test vectors, and operational guidance are documented in
+> [docs/nav-signing.md](../docs/nav-signing.md).
+
+### Operational summary & key conversion
+To configure an attestor key and enforce signatures on a deployment:
+
+1. Convert the publisher's Stellar address (`G...`) to raw 32-byte hex:
+   ```bash
+   PUBLISHER_KEY_HEX=$(python3 -c 'import base64,sys; print(base64.b32decode(sys.argv[1])[1:33].hex())' "$PRICE_PUBLISHER")
+   ```
+2. Register the attestor key:
+   ```bash
+   stellar contract invoke --id "$PRICE_GUARD_CID" --source admin --network "$NETWORK" -- configure_issuer_key \
+     --admin "$ADMIN" --asset "$RWA_SAC" --issuer_pubkey "$PUBLISHER_KEY_HEX"
+   ```
+3. Enable signature verification:
+   ```bash
+   stellar contract invoke --id "$PRICE_GUARD_CID" --source admin --network "$NETWORK" -- configure_signature_requirement \
+     --admin "$ADMIN" --required true
+   ```
 
 This was a breaking change to `publish_nav`'s call signature. Both `scripts/deploy.sh` and
 `scripts/e2e-smoke.sh` have since been updated for it (verified against a real testnet deployment
@@ -186,17 +217,17 @@ The table below catalogs every admin, risk, and pauser entry point in `Registry`
 
 | Function | Caller | Delay | Status | Rationale |
 |---|---|---|---|---|
-| `initialize` | Admin | Immediate | Intended | One-time bootstrap on initial deployment before any positions exist; subsequent calls panic (`registry: already initialized`). |
+| `initialize` | Anyone (first caller) | Immediate | Open gap | One-time bootstrap; later calls panic (`registry: already initialized`). There is **no auth check**, so whoever calls it first sets every role. Deploy and `initialize` must run back to back in the same script, and the script must read `roles` back to confirm (see Missing hardening in `AUDIT_NOTES.md`). |
 | `propose_admin` | Current Admin | Immediate | Intended | Leg 1 of two-step admin transfer; sets pending admin without transferring authority until accepted. |
 | `accept_admin` | Nominated Admin | Immediate | Intended | Leg 2 of two-step admin transfer; completes transfer upon recipient confirmation, preventing loss of admin access from typos. |
 | `queue_role_change` | Admin | 48h timelock | Intended | Enforces 48h advance notice before changing operational role addresses (`Pauser`, `Keeper`, `PricePublisher`, `Risk`). |
 | `execute_role_change` | Anyone | 48h after queue | Intended | Permissionless execution once the 48h timelock has elapsed. |
 | `register_asset` | Admin | Immediate | Intended | Onboarding a new asset does not modify existing risk parameters, haircuts, or active borrower positions; users opt in to new assets. |
-| `queue_param` | Admin | 48h timelock | Intended | Adjusting asset parameters (haircuts, LTV thresholds, borrow caps) alters liquidation and credit terms; 48h notice allows borrowers to adjust collateral or repay debt. |
+| `queue_param` | Admin | 48h timelock | Intended | Changes one `ParamChange` variant: `HaircutBaseBps`, `HaircutFxBps`, `PriceBandBps`, `DailyMoveBandBps`, `RedemptionLagDays` or `Status`. These are Registry's own asset parameters; the other contracts read their own config, not Registry's. 48h notice gives operators and users time to react. |
 | `cancel_param` | Admin | Immediate | Intended | Safely cancels a pending parameter change before execution if market conditions shift or an error is caught. |
 | `execute_param` | Anyone | 48h after queue | Intended | Applies queued parameter changes once the 48h timelock has elapsed. |
 | `raise_haircut_now` | Risk | Immediate | Intended | Emergency solvency defense: if an RWA depegs or shows market stress, risk can immediately raise haircuts (tighten risk) to protect the protocol. Can only increase, never decrease. |
-| `pause` | Pauser | Immediate | Intended | Emergency circuit breaker to instantly freeze capital outflows (draws, pledges, exits) during exploits or oracle failures. |
+| `pause` | Pauser | Immediate | Intended / Open gap (#210) | Immediate by design, so an incident can be stopped at once. But it sets only Registry's own flag: no other contract reads Registry's pause storage, so it does not freeze draws, pledges, exits or repos today. ExitDesk and RepoDvp have their own `pause`; CreditLine and PledgeVault have none (#210). |
 | `queue_unpause` | Admin | 48h timelock | Intended | Resuming protocol operations after an incident requires 48h notice so users can review the post-incident state before normal activity resumes. |
 | `cancel_unpause` | Admin | Immediate | Intended | Cancels a queued unpause if investigation reveals an ongoing vulnerability. |
 | `execute_unpause` | Anyone | 48h after queue | Intended | Unpauses the target scope once the 48h timelock has elapsed. |
@@ -208,7 +239,7 @@ The table below catalogs every admin, risk, and pauser entry point in `Registry`
 
 | Function | Caller | Delay | Status | Rationale |
 |---|---|---|---|---|
-| `initialize` | Admin | Immediate | Intended | One-time bootstrap on deployment; subsequent calls panic (`price-guard: already initialized`). |
+| `initialize` | Anyone (first caller) | Immediate | Open gap | One-time bootstrap; later calls panic (`price-guard: already initialized`). There is **no auth check**, so whoever calls it first becomes admin. Deploy and `initialize` must run back to back, and the deploy script must read the roles back to confirm. |
 | `propose_admin` | Current Admin | Immediate | Intended | Two-step admin transfer nomination without immediate privilege transfer. |
 | `accept_admin` | Nominated Admin | Immediate | Intended | Finalizes admin role transfer upon explicit recipient confirmation. |
 | `queue_role_change` | Admin | 48h timelock | Intended | 48h delay before changing operational roles (`Pauser`, `Keeper`, `PricePublisher`, `Risk`). |
@@ -218,7 +249,7 @@ The table below catalogs every admin, risk, and pauser entry point in `Registry`
 | `execute_upgrade` | Anyone | 48h after queue | Intended | Applies bytecode upgrade after the 48h delay has elapsed. |
 | `configure_asset` | Admin | Dynamic | Intended | Initial asset onboarding and tightening safety bands (narrower price band, shorter max staleness) take effect immediately to enhance security. Loosening bands requires 48h timelock via `queue_config` to prevent stealth weakening of outlier defenses. |
 | `configure_issuer_key` | Admin | Dynamic | Intended | Initial attestor key registration is immediate for onboarding. Rotating an existing attestor key requires 48h timelock via `queue_config` to prevent immediate hijacking of the NAV signer. |
-| `configure_signature_requirement` | Admin | Dynamic | Intended | Requiring signatures (`required = true`) strengthens security and takes effect immediately. Disabling verification (`required = false`) relaxes security and is restricted to the 48h timelock via `queue_config`. |
+| `configure_signature_requirement` | Admin | Dynamic | Intended | Requiring signatures (`required = true`) strengthens security and takes effect immediately. Turning an existing requirement off (`true` → `false`) relaxes security and must go through the 48h timelock via `queue_config`. Exception: if the flag has never been set, the first call applies immediately even with `required = false` (`contracts/price-guard/src/lib.rs`, `configure_signature_requirement`). |
 | `remove_source` | Admin | Immediate | Intended / Open Gap (#84) | Immediate removal allows admins to drop an exploited, manipulated, or failing oracle source. Open issue [#84](https://github.com/DevTobis/ballast/issues/84) tracks adding an admin allowlist of valid sources. |
 | `queue_config` | Admin | 48h timelock | Intended | Queues loosening configuration changes (`Asset`, `IssuerPubKey`, `SignatureRequirement`) with 48h delay. |
 | `cancel_config` | Admin | Immediate | Intended | Safely cancels an unexecuted queued config change. |
@@ -226,7 +257,7 @@ The table below catalogs every admin, risk, and pauser entry point in `Registry`
 | `confirm_halt_cleared` | Risk | Immediate | Intended / Open Gap (#807) | Circuit breaker unlatch. When a large price jump trips the circuit breaker, the price locks at `LastGood`. Once human risk operators verify off-chain conditions, unlatching must be immediate to restore trading. Open issue [#807](https://github.com/DevTobis/ballast/issues/807) tracks missing validations when asset is not halted or not configured. |
 
 ### Related open gaps in other protocol contracts
-- `ExitDesk.configure_asset`: Currently immediate for all changes; open issue [#214](https://github.com/DevTobis/ballast/issues/214) tracks placing spread and cap loosening behind the 48h timelock.
+- `ExitDesk.configure_asset`: since #214, a new `price_guard`, a lower spread or a higher cap must go through `queue_configure_asset` (48h); tightening and an asset's first listing stay immediate.
 - `RepoDvP.configure_asset`: Currently immediate for all changes; open issue [#215](https://github.com/DevTobis/ballast/issues/215) tracks placing margin and haircut loosening behind the 48h timelock.
 
 ## Timelocked contract upgrades (`Registry` and `PriceGuard`)
