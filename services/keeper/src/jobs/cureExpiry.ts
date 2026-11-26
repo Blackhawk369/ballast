@@ -33,7 +33,7 @@ import { schema, type Database } from "@ballast/db";
 import { decimalStringToScaled, scaledToDecimalString } from "@ballast/domain-types";
 import type { CreditLineClient, PledgeVaultClient } from "@ballast/contract-clients";
 import type { KmsSigner } from "@ballast/operator-signing";
-import { signAndSubmit } from "./submit.js";
+import { signAndSubmit, type NetworkSubmissionConfig } from "./submit.js";
 import { emptyResult, type JobResult } from "./types.js";
 
 const UNHEALTHY = new Set(["MarginCall", "Liquidation"]);
@@ -46,6 +46,8 @@ export async function runCureExpiryJob(
   creditLineClient: CreditLineClient,
   pledgeVaultClient: PledgeVaultClient,
   signer: KmsSigner,
+  /** RPC URL and passphrase from the keeper's startup config; omitted, the environment is read. */
+  network?: NetworkSubmissionConfig,
 ): Promise<JobResult> {
   const result = emptyResult();
   const keeper = signer.publicKey();
@@ -80,7 +82,7 @@ export async function runCureExpiryJob(
         }
 
         if (onChain.breachLedger == null) {
-          await signAndSubmit(signer, await creditLineClient.poke(contractLine, keeper));
+          await signAndSubmit(signer, await creditLineClient.poke(contractLine, keeper), network);
           result.skipped++; // armed now; liquidation needs a later ledger, i.e. a later run
           continue;
         }
@@ -118,7 +120,7 @@ export async function runCureExpiryJob(
       const txHashes: string[] = [];
       if (!alreadyLiquidating) {
         txHashes.push(
-          await signAndSubmit(signer, await creditLineClient.liquidate(keeper, contractLine, "transfer")),
+          await signAndSubmit(signer, await creditLineClient.liquidate(keeper, contractLine, "transfer"), network),
         );
       }
 
@@ -134,6 +136,7 @@ export async function runCureExpiryJob(
               held,
               lenderAccount.stellarAccount,
             ),
+            network,
           ),
         );
       }

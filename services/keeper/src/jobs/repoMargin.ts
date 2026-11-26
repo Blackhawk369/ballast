@@ -20,7 +20,7 @@ import { schema, type Database } from "@ballast/db";
 import { scaledToDecimalString } from "@ballast/domain-types";
 import type { RepoDvpClient } from "@ballast/contract-clients";
 import type { KmsSigner } from "@ballast/operator-signing";
-import { signAndSubmit } from "./submit.js";
+import { signAndSubmit, type NetworkSubmissionConfig } from "./submit.js";
 import { emptyResult, type JobResult } from "./types.js";
 
 const IN_CALL_BAND = new Set(["MarginCall", "Liquidation"]);
@@ -30,6 +30,8 @@ export async function runRepoMarginJob(
   repoDvpClient: RepoDvpClient,
   signer: KmsSigner,
   now: Date = new Date(),
+  /** RPC URL and passphrase from the keeper's startup config; omitted, the environment is read. */
+  network?: NetworkSubmissionConfig,
 ): Promise<JobResult> {
   const result = emptyResult();
   const keeper = signer.publicKey();
@@ -65,7 +67,7 @@ export async function runRepoMarginJob(
       const deadline = onChain.cureDeadline != null ? Number(onChain.cureDeadline) : null;
 
       if (onChain.pendingMarginCall && inBand && deadline !== null && now.getTime() / 1000 >= deadline) {
-        await signAndSubmit(signer, await repoDvpClient.defaultClose(keeper, id));
+        await signAndSubmit(signer, await repoDvpClient.defaultClose(keeper, id), network);
         await db.update(schema.repoTrade).set({ status: "defaulted" }).where(eq(schema.repoTrade.id, trade.id));
         result.processed++;
         continue;
@@ -73,12 +75,15 @@ export async function runRepoMarginJob(
 
       if (inBand !== onChain.pendingMarginCall) {
         // Either a call has to be opened, or the open one has been cured by the price.
-        await signAndSubmit(signer, await repoDvpClient.callMargin(keeper, id));
+        await signAndSubmit(signer, await repoDvpClient.callMargin(keeper, id), network);
         const after = await repoDvpClient.trade(id);
 
         if (after.pendingMarginCall && after.cureDeadline != null) {
-          // RepoDvP cash legs and margin calls are strictly denominated in USDC (the single
-          // configured settlement asset set via RepoDvP.set_usdc), per PRD §5 and §8.
+          // USDC is correct by construction, not a shortcut: RepoDvP holds one cash token per
+          // deployment (the instance `usdc` set by `set_usdc`), every cash leg moves that token,
+          // and `margin_call_amount` is denominated in it. `repo_trade` therefore has no currency
+          // column; if RepoDvP ever supports more than one cash token, store it on the trade
+          // and read it here instead.
           await db.insert(schema.repoMarginCall).values({
             tradeId: trade.id,
             amount: scaledToDecimalString(BigInt(after.marginCallAmount)),

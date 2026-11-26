@@ -12,13 +12,15 @@ import { and, eq, lte } from "drizzle-orm";
 import { schema, type Database } from "@ballast/db";
 import type { RepoDvpClient } from "@ballast/contract-clients";
 import type { KmsSigner } from "@ballast/operator-signing";
-import { signAndSubmit } from "./submit.js";
+import { signAndSubmit, type NetworkSubmissionConfig } from "./submit.js";
 import { emptyResult, type JobResult } from "./types.js";
 
 export async function runRepoUnwindJob(
   db: Database,
   repoDvpClient: RepoDvpClient,
   signer: KmsSigner,
+  /** RPC URL and passphrase from the keeper's startup config; omitted, the environment is read. */
+  network?: NetworkSubmissionConfig,
 ): Promise<JobResult> {
   const result = emptyResult();
   const now = new Date();
@@ -58,7 +60,7 @@ export async function runRepoUnwindJob(
       }
 
       const unsignedXdr = await repoDvpClient.unwind(signer.publicKey(), contractId);
-      const hash = await signAndSubmit(signer, unsignedXdr);
+      const hash = await signAndSubmit(signer, unsignedXdr, network);
 
       await db
         .update(schema.repoTrade)
